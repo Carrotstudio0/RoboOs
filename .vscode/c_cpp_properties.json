@@ -1,0 +1,52 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/firmware/include",
+                "${workspaceFolder}/firmware/drivers/gpio",
+                "${workspaceFolder}/firmware/drivers/uart",
+                "${workspaceFolder}/firmware/drivers/timer",
+                "${workspaceFolder}/firmware/drivers/memory"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE"
+            ],
+            "windowsSdkVersion": "10.0.19041.0",
+            "compilerPath": "C:/Program Files/LLVM/bin/clang.exe",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseEngine": "default"
+        },
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/firmware/include",
+                "/usr/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseEngine": "default"
+        },
+        {
+            "name": "Mac",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/firmware/include",
+                "/usr/include"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/clang",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseEngine": "default"
+        }
+    ],
+    "version": 4
+}
