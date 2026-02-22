@@ -1,0 +1,692 @@
+# 🤖 RoboOS — نظام تشغيل مدمج للروبوتات
+
+<div align="center">
+
+![Version](https://img.shields.io/badge/Version-2.0--Phase2-blue)
+![Status](https://img.shields.io/badge/Status-Production--Ready-brightgreen)
+![Platform](https://img.shields.io/badge/Platform-STM32F407%20%7C%20ESP32-orange)
+![Language](https://img.shields.io/badge/Language-C%20%2B%20ASM%20%2B%20Python-purple)
+![Tests](https://img.shields.io/badge/Tests-14%2F14%20PASS-brightgreen)
+
+**نظام تشغيل حقيقي خفيف الوزن لروبوتات ARM Cortex-M4**  
+*مبني بـ C + Assembly + Python | مع لغة برمجة مخصصة قريبة من الهاردوير*
+
+</div>
+
+---
+
+## 📑 جدول المحتويات
+
+- [نظرة عامة](#-نظرة-عامة)
+- [المعمارية — الطبقات الكاملة](#-المعمارية--الطبقات-الكاملة)
+- [خريطة الذاكرة](#-خريطة-الذاكرة)
+- [تدفق الـ Boot](#-تدفق-الـ-boot)
+- [تبديل السياق RTOS](#-تبديل-السياق-rtos)
+- [هيكل الملفات](#-هيكل-الملفات)
+- [المكونات التفصيلية](#-المكونات-التفصيلية)
+- [وحدات الأسمبلي](#-وحدات-الأسمبلي)
+- [دورة حياة المهمة](#-دورة-حياة-المهمة)
+- [المحيطات المتصلة](#-المحيطات-المتصلة)
+- [البدء السريع](#-البدء-السريع)
+- [حالة المشروع](#-حالة-المشروع)
+- [الخطوات التالية](#-الخطوات-التالية)
+
+---
+
+## 🧠 نظرة عامة
+
+**RoboOS** نظام تشغيل مدمج مصمم من الصفر لوحدات التحكم الدقيقة ARM Cortex-M4، يجمع بين:
+
+- 🔩 **نواة RTOS حقيقية** مكتوبة بالأسمبلي (context switch, syscalls, boot)
+- ⚙️ **طبقة HAL** لتجريد الهاردوير عن بقية النظام
+- 🖥️ **محاكي كامل** يُشغّل النظام على الكمبيوتر بدون MCU
+- 🔤 **لغة برمجة مخصصة** للتحكم بالروبوت (Lexer → Parser → Executor)
+- 🤖 **Robot APIs** عالية المستوى للتحكم بالمحركات والمستشعرات وLED
+
+| الخاصية | القيمة |
+|---|---|
+| الهدف الأساسي | ARM Cortex-M4 — STM32F407 |
+| السرعة | 168 MHz |
+| الذاكرة | 512KB Flash / 128KB SRAM |
+| نظام الجدولة | Round-Robin مع أولويات |
+| لغات البرمجة | C + ARM Assembly + Python |
+| اختبارات | 14/14 ✅ |
+| أسطر الكود | ~7,000+ سطر |
+
+---
+
+## 🏗️ المعمارية — الطبقات الكاملة
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         [APPLICATION LAYER]                              │
+│                    firmware/app/ + firmware/robot_api/                   │
+│   motor_control.py  │  led_control.py  │  robot_simulation.py            │
+│   sensor_tasks.py   │  language_demo.py                                  │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │  API Calls / Custom Language Programs
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                     [LANGUAGE ENGINE LAYER]                              │
+│                        firmware/lang/engine.py                           │
+│  ┌──────────────┐   ┌──────────────┐   ┌──────────────────────────────┐  │
+│  │    Lexer     │──▶│    Parser    │──▶│         Executor             │  │
+│  │  (Tokenizer) │   │  (AST Build) │   │  (Runtime Variable/Func Mgr) │  │
+│  └──────────────┘   └──────────────┘   └──────────────────────────────┘  │
+│   Keywords: var, if, while, for, func, return, motor, sensor, led        │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │  Task Requests
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                       [SCHEDULER LAYER]                                  │
+│                  firmware/core/scheduler.py  (Python Sim)                │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐     │
+│  │  Task 0  │  │  Task 1  │  │  Task 2  │  │  Idle Task           │     │
+│  │  READY   │  │ RUNNING  │  │ BLOCKED  │  │  hal_wfi() ← ASM     │     │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────────┘     │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │  SVC #n  /  PendSV
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                        [KERNEL LAYER]                                    │
+│                       firmware/kernel/                                   │
+│  ┌──────────────────────────┐  ┌─────────────────────────────────────┐   │
+│  │         irq.c            │  │       Assembly Handlers             │   │
+│  │  systick_init()          │  │  PendSV_Handler ← context_switch.s  │   │
+│  │  irq_enable/disable()    │  │  SVC_Handler    ← syscall.s         │   │
+│  │  irq_enter_critical()    │  │  SysTick_Handler → tick update       │   │
+│  │  HardFault_Handler (C)   │  │  HardFault naked handler (ASM)       │   │
+│  └──────────────────────────┘  └─────────────────────────────────────┘   │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │  Register reads / writes
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                         [HAL LAYER]                                      │
+│                        firmware/hal/                                     │
+│  ┌────────────────────────────────────────────────────────────────┐      │
+│  │            hal_asm.s  — Assembly HAL Primitives                │      │
+│  │  hal_disable_irq()  hal_enable_irq()  hal_enter_critical()     │      │
+│  │  hal_dsb()  hal_isb()  hal_dmb()  hal_wfi()  hal_wfe()         │      │
+│  │  hal_get_psp()  hal_set_psp()  hal_get_control()               │      │
+│  │  hal_atomic_load()  hal_atomic_store()  hal_cas()              │      │
+│  └────────────────────────────────────────────────────────────────┘      │
+│  ┌────────────────────────────────────────────────────────────────┐      │
+│  │         peripheral_asm.s — Peripheral ASM Helpers              │      │
+│  │  asm_spi1_transfer_burst()  asm_adc1_read_channel()            │      │
+│  │  asm_gpio_bit_write()  asm_delay_us()  asm_memcpy32()          │      │
+│  └────────────────────────────────────────────────────────────────┘      │
+│  ┌────────────────────────────────────────────────────────────────┐      │
+│  │      __init__.py — Python HAL Simulation                       │      │
+│  │  GPIO │ Timer │ UART │ PWM │ ADC                               │      │
+│  └────────────────────────────────────────────────────────────────┘      │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                       [DRIVER LAYER]  (C)                                │
+│                      firmware/drivers/                                   │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐     │
+│  │  gpio.c  │  │  uart.c  │  │  timer.c │  │  memory_manager.c    │     │
+│  │  373 ln  │  │  364 ln  │  │  350 ln  │  │       400 ln         │     │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────────────────┘     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                                │
+│  │  i2c.c   │  │  spi.c   │  │  adc.c   │  ← ★ NEW                      │
+│  └──────────┘  └──────────┘  └──────────┘                                │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                      [ASSEMBLY CORE]                                     │
+│                      firmware/core/*.s                                   │
+│  ┌────────────────┐  ┌──────────────────┐  ┌────────────────────────┐   │
+│  │  isr_vectors.s │  │     boot.s       │  │     math_utils.s       │   │
+│  │  Vector Table  │  │  Reset_Handler   │  │  asm_fast_sqrt (FPU)   │   │
+│  │  [0]  _estack  │  │  Copy .data      │  │  asm_vec3_dot          │   │
+│  │  [1]  Reset    │  │  Zero  .bss      │  │  asm_vec3_cross        │   │
+│  │  [14] PendSV   │  │  Enable FPU      │  │  asm_pid_update        │   │
+│  │  [15] SysTick  │  │  SystemInit()    │  │  asm_clamp / asm_clz   │   │
+│  └────────────────┘  │  → main()        │  └────────────────────────┘   │
+│  ┌────────────────┐  └──────────────────┘  ┌────────────────────────┐   │
+│  │context_switch.s│                         │      syscall.s         │   │
+│  │ PendSV_Handler │                         │  SVC #0 → sys_yield()  │   │
+│  │  cpsid i       │                         │  SVC #1 → sys_sleep()  │   │
+│  │  mrs r0, psp   │                         │  SVC #2 → task_create()│   │
+│  │  stmdb {r4-r11}│                         │  SVC #3 → task_term()  │   │
+│  │  → scheduler() │                         │  SVC #4 → mutex_lock() │   │
+│  │  ldmia {r4-r11}│                         │  SVC #5 → mutex_unlock │   │
+│  │  msr psp, r0   │                         └────────────────────────┘   │
+│  │  bx lr         │                                                      │
+│  └────────────────┘                                                      │
+└────────────────────────────┬─────────────────────────────────────────────┘
+                             │  Memory-Mapped Registers
+┌────────────────────────────▼─────────────────────────────────────────────┐
+│                        [HARDWARE]                                        │
+│              ARM Cortex-M4  (STM32F407 / STM32F411)                     │
+│  CPU: 168 MHz │ FPU: fpv4-sp-d16 │ Flash: 512KB │ SRAM: 128KB           │
+│  Peripherals: GPIO, UART1, SPI1, I2C1, TIM2-5, ADC1, DMA1/2             │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🗺️ خريطة الذاكرة
+
+```
+0xFFFFFFFF ┌─────────────────────────────────────┐
+           │         System ROM / Vendor          │
+0xE0100000 ├─────────────────────────────────────┤
+           │     Core Debug (ITM, DWT, FPB)       │
+0xE0000000 ├─────────────────────────────────────┤
+           │   PPB: NVIC + SCB + SysTick + FPU   │
+0xE0000000 ├─────────────────────────────────────┤
+           │         Peripheral Buses             │
+           │    (APB1/APB2: UART, SPI, I2C...)   │
+0x40000000 ├─────────────────────────────────────┤
+           │         SRAM: 128 KB                │
+           │  ┌──────────────────────────────┐   │
+           │  │ 0x20020000 ← _estack (top)   │   │
+           │  │ ███████████ Stack (8 KB)  ██ │   │
+           │  │ ·  ·  ·  grows downward  ·  │   │
+           │  │                              │   │
+           │  │ ·  ·  ·  grows upward   ·  │   │
+           │  │ ░░░░░░░░░  Heap (16 KB) ░░  │   │
+           │  │ 0x20008000 ← _heap_end       │   │
+           │  ├──────────────────────────────┤   │
+           │  │ .bss   — متغيرات غير مهيأة  │   │
+           │  │ .data  — متغيرات مهيأة      │   │
+           │  │ 0x20000000 ← SRAM base       │   │
+           │  └──────────────────────────────┘   │
+0x20000000 ├─────────────────────────────────────┤
+           │         Flash ROM: 512 KB           │
+           │  ┌──────────────────────────────┐   │
+           │  │ .rodata — const data         │   │
+           │  │ .text   — code (C + ASM)     │   │
+           │  │  > isr_vectors.s             │   │
+           │  │  > boot.s                    │   │
+           │  │  > context_switch.s          │   │
+           │  │  > syscall.s                 │   │
+           │  │  > math_utils.s              │   │
+           │  │  > hal_asm.s                 │   │
+           │  │  > C drivers & kernel        │   │
+           │  ├──────────────────────────────┤   │
+           │  │ .isr_vector — Vector Table   │   │
+           │  │ 0x08000000 ← Flash base      │   │
+           │  └──────────────────────────────┘   │
+0x08000000 └─────────────────────────────────────┘
+```
+
+---
+
+## ⚡ تدفق الـ Boot
+
+```
+Power ON / Reset
+      │
+      ▼
+[isr_vectors.s]
+  g_pfnVectors[0] → _estack  ← MSP يُحمّل تلقائياً من CPU
+  g_pfnVectors[1] → Reset_Handler  ← CPU يقفز هنا
+      │
+      ▼
+[boot.s]  Reset_Handler:
+  1. cpsid i           ─ تعطيل المقاطعات
+  2. Copy .data         ─ نقل البيانات من Flash → SRAM
+     LDR r0 = _sidata (Flash LMA)
+     LDR r1 = _sdata  (SRAM VMA)
+     loop: STR [r0++] → [r1++]  حتى r1 == _edata
+  3. Zero .bss          ─ تصفير المتغيرات غير المهيأة
+     loop: STR 0 → [r0++]  حتى r0 == _ebss
+  4. Enable FPU         ─ كتابة CPACR bits [23:20] = 0xF
+  5. bl SystemInit()    ─ تهيئة PLL/Clock → 168 MHz
+  6. cpsie i            ─ تفعيل المقاطعات
+  7. bl main()          ─ دخول نواة RoboOS
+  8. wfi loop           ─ (لا يُنفَّذ أبداً)
+      │
+      ▼
+[kernel] main() / RoboOS Kernel:
+  1. systick_init(168_000_000, 1000)   ← SysTick @1ms
+  2. irq_set_priority(PendSV, LOWEST)  ← تبديل السياق آخر شيء
+  3. scheduler_init()
+  4. task_create(motor_task, ...)
+  5. task_create(sensor_task, ...)
+  6. scheduler_start()                 ← حلقة لا تنتهي
+```
+
+---
+
+## 🔄 تبديل السياق RTOS
+
+```
+SysTick IRQ  (كل 1ms)
+      │
+      ▼
+[irq.c] SysTick_Handler:
+  g_systick_count++
+  SCB_ICSR |= PENDSVSET  ← طلب تشغيل PendSV
+      │
+      ▼  (بعد اكتمال جميع ISRs ذات الأولوية الأعلى)
+[context_switch.s]  PendSV_Handler:
+  cpsid i                    ← Critical Section
+  mrs   r0,  psp             ← قرأ PSP للمهمة الحالية
+  stmdb r0!, {r4-r11}        ← احفظ السجلات على Stack المهمة
+  STR   r0 → current_tcb→sp ← حفظ PSP في TCB
+  BL    scheduler_get_next   ← الجدولة تختار المهمة التالية
+  STR   new_tcb              ← تحديث g_current_tcb
+  LDR   r0  = new_tcb→sp    ← PSP الجديدة
+  ldmia r0!, {r4-r11}        ← استعادة السجلات من Stack الجديدة
+  msr   psp, r0              ← تحديث PSP
+  cpsie i
+  bx    lr (EXC_RETURN=0xFFFFFFFD) ← عُد لـ Thread Mode بـ PSP
+      │
+      ▼
+[CPU يستعيد r0-r3, r12, lr, pc, xpsr تلقائياً]
+  تنفيذ المهمة الجديدة من PC المحفوظ
+```
+
+---
+
+## 📁 هيكل الملفات
+
+```
+RoboOS/
+├── CMakeLists.txt                   ← نظام البناء (ARM + ASM + جميع المحيطات)
+├── README.md                        ← هذا الملف
+├── build.py                         ← سكريبت البناء لـ Python
+├── requirements.txt                 ← متطلبات Python
+│
+├── firmware/
+│   ├── core/
+│   │   ├── isr_vectors.s            ← [ASM] Vector Table الكامل
+│   │   ├── boot.s                   ← [ASM] Real Bootloader
+│   │   ├── context_switch.s         ← [ASM] RTOS Context Switch (PendSV)
+│   │   ├── syscall.s                ← [ASM] System Call Gateway (SVC)
+│   │   ├── math_utils.s             ← [ASM] FPU/DSP Math Suite
+│   │   ├── linker.ld                ← [LD]  Linker Script
+│   │   └── scheduler.py             ← [PY]  Scheduler (محاكاة Python)
+│   │
+│   ├── hal/
+│   │   ├── hal_asm.s                ← [ASM] HAL Primitives (IRQ, Atomics, Barriers)
+│   │   ├── peripheral_asm.s         ← [ASM] Peripheral ASM Helpers ★ NEW
+│   │   ├── manager.py               ← [PY]  HALManager (Python Sim)
+│   │   └── __init__.py              ← [PY]  GPIO / UART / Timer / PWM / ADC
+│   │
+│   ├── kernel/
+│   │   ├── irq.h                    ← [C]   IRQ Interface
+│   │   └── irq.c                    ← [C]   SysTick + NVIC + HardFault
+│   │
+│   ├── drivers/
+│   │   ├── gpio/
+│   │   │   ├── gpio.h
+│   │   │   └── gpio.c               ← [C]   GPIO Driver (373 سطر)
+│   │   ├── uart/
+│   │   │   ├── uart.h
+│   │   │   └── uart.c               ← [C]   UART Driver (364 سطر)
+│   │   ├── timer/
+│   │   │   ├── timer.h
+│   │   │   └── timer.c              ← [C]   Timer Driver (350 سطر)
+│   │   ├── memory/
+│   │   │   ├── memory_manager.h
+│   │   │   └── memory_manager.c     ← [C]   Memory Manager (400 سطر)
+│   │   ├── i2c/
+│   │   │   ├── i2c.h
+│   │   │   └── i2c.c               ← [C]   I2C Driver ★ NEW
+│   │   ├── spi/
+│   │   │   ├── spi.h
+│   │   │   └── spi.c               ← [C]   SPI Driver ★ NEW
+│   │   └── adc/
+│   │       ├── adc.h
+│   │       └── adc.c               ← [C]   ADC Driver ★ NEW
+│   │
+│   ├── lang/
+│   │   └── engine.py               ← [PY]  Language Engine (Lexer+Parser+Executor)
+│   │
+│   ├── robot_api/
+│   │   └── robot.py                ← [PY]  Robot APIs (Motor, LED, Sensor, Servo)
+│   │
+│   └── simulator/
+│       ├── virtual_hw.py           ← [PY]  Virtual Hardware Simulator
+│       └── simulator.py            ← [PY]  FirmwareSimulator (Main Runner)
+│
+├── tests/
+│   └── test_suite.py               ← 14 اختباراً شاملاً (14/14 ✅)
+│
+├── examples/
+│   ├── motor_control.py
+│   ├── led_control.py
+│   ├── language_demo.py
+│   └── robot_simulation.py
+│
+└── docs/
+    ├── ARCHITECTURE.md             ← معمارية النظام (العربية)
+    ├── ARCHITECTURE_FULL.md        ← المعمارية الكاملة مع ASM
+    ├── API_REFERENCE.md            ← مرجع API الكامل
+    ├── QUICKSTART.md               ← دليل البداية السريعة
+    ├── C_DRIVERS_BUILD.md          ← بناء درايفرات C
+    └── SUMMARY.md                  ← ملخص المشروع
+```
+
+---
+
+## 🔩 المكونات التفصيلية
+
+### 1️⃣ Virtual Hardware Layer — `firmware/simulator/`
+> **الهدف**: محاكاة الهاردوير بالكامل على الكمبيوتر
+
+| الفئة | الوظيفة |
+|---|---|
+| `VirtualPin` | دبوس افتراضي — قراءة/كتابة رقمية وتناظرية |
+| `VirtualUART` | منفذ تسلسلي افتراضي مع بافر |
+| `VirtualTimer` | مؤقت افتراضي مع callbacks |
+| `VirtualHardware` | مديرة الهاردوير الكاملة |
+| `FirmwareSimulator` | محاكي النظام — يدمج كل الطبقات |
+
+### 2️⃣ HAL (Hardware Abstraction Layer) — `firmware/hal/`
+> **الهدف**: تجريد الهاردوير لتسهيل النقل بين الأجهزة المختلفة
+
+| المكون | الوصف |
+|---|---|
+| `GPIO` | إدارة الدبابيس الرقمية |
+| `Timer` | المؤقتات والـ PWM |
+| `UART` | الاتصال التسلسلي |
+| `PWM` | التحكم بعرض النبضة |
+| `ADC` | تحويل إشارات تناظرية → رقمية |
+| `HALManager` | إدارة مركزية لجميع موارد الهاردوير |
+
+### 3️⃣ Firmware Core / Kernel — `firmware/core/` + `firmware/kernel/`
+> **الهدف**: نواة RTOS حقيقية مع جدولة وإدارة مقاطعات
+
+- جدولة **Round-Robin** مع أولويات
+- تبديل سياق كامل بالأسمبلي (PendSV + PSP)
+- System Calls عبر SVC Handler
+- HardFault Handler للتشخيص
+
+### 4️⃣ Language Engine — `firmware/lang/engine.py`
+> **الهدف**: لغة برمجة مخصصة قريبة من الهاردوير للتحكم بالروبوت
+
+```
+كود المستخدم → Lexer → Tokens → Parser → AST → Executor → نتيجة
+```
+
+**الكلمات المفتاحية المدعومة:**
+```
+var    if    while    for    func    return
+motor  sensor  led   print  servo   delay
+```
+
+### 5️⃣ Robot APIs — `firmware/robot_api/robot.py`
+> **الهدف**: واجهات عالية المستوى لأجزاء الروبوت
+
+| الفئة | الوظيفة |
+|---|---|
+| `Motor` | التحكم بالمحركات (سرعة، اتجاه) |
+| `LED` | التحكم بمصابيح LED |
+| `Sensor` | قراءة قيم المستشعرات |
+| `ServoMotor` | التحكم بزوايا محركات Servo |
+| `Robot` | تجميع ودمج جميع المكونات |
+
+---
+
+## 🔧 وحدات الأسمبلي
+
+| الملف | الوظيفة | التعليمات الرئيسية |
+|---|---|---|
+| `isr_vectors.s` | جدول المتجهات (Vector Table) | `.word` entries لكل IRQ |
+| `boot.s` | Bootloader حقيقي | `ldm/stm`, `dsb`, `isb`, `cpsid/ie`, `bl` |
+| `context_switch.s` | RTOS Context Switch | `mrs/msr psp`, `stmdb/ldmia {r4-r11}`, `bx lr` |
+| `syscall.s` | بوابة نداءات النظام | `svc #n`, `ldrb [pc-2]`, dispatch table |
+| `math_utils.s` | رياضيات / DSP / FPU | `vsqrt.f32`, `vmul/vmla/vmls`, `smull`, `clz`, `rev` |
+| `hal_asm.s` | HAL Primitives | `cpsid/ie`, `dsb/isb/dmb`, `wfi/wfe`, `ldrex/strex` |
+| `peripheral_asm.s` | مساعدات المحيطات | SPI burst pump, ADC poll, GPIO bit-band, µs delay |
+
+### ⚡ مكاسب الأداء من الأسمبلي
+
+| الدالة | بدلاً عن | الكسب |
+|---|---|---|
+| `asm_spi1_transfer_burst()` | C loop + function calls | لا overhead — نبض مباشر |
+| `asm_adc1_read_channel()` | C while loop | أقل تعليمات في الانتظار |
+| `asm_gpio_bit_write()` | Read-Modify-Write | ذري بالكامل (Bit-Band) |
+| `asm_delay_us()` | `HAL_Delay` (SysTick) | دقيق لأقل من 1ms |
+| `asm_memcpy32()` | `memcpy()` | 4 بايت في كل دورة ساعة |
+
+---
+
+## 🔁 دورة حياة المهمة
+
+```
+              task_create()
+                   │
+                   ▼
+               [IDLE / READY]
+                   │
+          scheduler picks task
+                   │
+                   ▼
+               [RUNNING] ◄── SysTick (1ms tick)
+              /    │    \
+             /     │     \
+       sys_yield  blocks  terminates
+           │         │         │
+           ▼         ▼         ▼
+        [READY]   [BLOCKED]  [TERMINATED]
+           │         │
+           └──wakeup─┘
+                (event / timer)
+```
+
+---
+
+## 🤖 المحيطات المتصلة بـ MCU
+
+```
+                ┌─────────────────────────────────────────────┐
+                │            RoboOS MCU (STM32F407)           │
+                │                                             │
+┌───────────┐   │   ┌──────────────────────────────────────┐  │
+│ IMU / Mag │◄──┼───┤ I2C1 (PB6/PB7) — 400kHz Fast Mode   │  │
+│ MPU-6050  │   │   │  i2c_write_read() → 6-axis data      │  │
+│ HMC5883   │   │   │  asm_delay_us() for bus recovery      │  │
+└───────────┘   │   └──────────────────────────────────────┘  │
+                │                                             │
+┌───────────┐   │   ┌──────────────────────────────────────┐  │
+│ Flash SPI │◄──┼───┤ SPI1 (PA5/PA6/PA7) — 42MHz Max       │  │
+│ W25Q64    │   │   │  asm_spi1_transfer_burst() — ASM pump │  │
+│ OLED/LCD  │   │   │  spi_transfer_dma() for large frames  │  │
+└───────────┘   │   └──────────────────────────────────────┘  │
+                │                                             │
+┌───────────┐   │   ┌──────────────────────────────────────┐  │
+│ IR Sensor │◄──┼───┤ ADC1 (PA0..PA5) — 12-bit, Scan mode  │  │
+│ Battery   │   │   │  asm_adc1_read_channel() — ASM poll   │  │
+│ Joystick  │   │   │  adc_read_temperature() — internal    │  │
+└───────────┘   │   └──────────────────────────────────────┘  │
+                │                                             │
+┌───────────┐   │   ┌──────────────────────────────────────┐  │
+│  Motors   │◄──┼───┤ GPIO + PWM — asm_gpio_bit_write()    │  │
+│  LEDs     │   │   │  Bit-Band atomic GPIO toggle          │  │
+│  Relays   │   │   │  gpio.c + timer.c for PWM             │  │
+└───────────┘   │   └──────────────────────────────────────┘  │
+                │                                             │
+┌───────────┐   │   ┌──────────────────────────────────────┐  │
+│ PC/Debug  │◄──┼───┤ UART1 (PA9/PA10) — 115200 baud       │  │
+│ Bluetooth │   │   │  uart.c + DMA for logging             │  │
+└───────────┘   │   └──────────────────────────────────────┘  │
+                │                                             │
+                └─────────────────────────────────────────────┘
+```
+
+---
+
+## 🚀 البدء السريع
+
+### المتطلبات
+
+| المتطلب | الإصدار |
+|---|---|
+| Python | 3.8+ |
+| GCC / ARM GCC | أي إصدار حديث |
+| CMake | 3.10+ |
+| ESP-IDF *(اختياري)* | لـ ESP32 |
+| STM32CubeMX *(اختياري)* | لـ STM32 |
+
+### التثبيت
+
+```bash
+# استنساخ المشروع
+git clone <repo-url>
+cd RoboOs
+
+# إنشاء بيئة Python
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux/Mac
+
+# تثبيت المتطلبات
+pip install -r requirements.txt
+```
+
+### تشغيل الاختبارات
+
+```bash
+python tests/test_suite.py
+# النتيجة المتوقعة: 14/14 tests PASSED ✅
+```
+
+### تشغيل الأمثلة
+
+```bash
+python examples/motor_control.py
+python examples/led_control.py
+python examples/language_demo.py
+python examples/robot_simulation.py
+```
+
+### بناء درايفرات C (اختياري)
+
+```bash
+mkdir build
+cd build
+cmake ..
+cmake --build .      # Windows
+# make               # Linux/Mac
+```
+
+### مثال سريع — Python API
+
+```python
+from firmware.robot_api.robot import Robot
+
+robot = Robot("MyBot")
+robot.add_led("status", pin=13)
+robot.add_motor("left", pin_a=2, pin_b=3)
+
+led = robot.get_led("status")
+led.turn_on()
+
+motor = robot.get_motor("left")
+motor.set_speed(128)
+```
+
+### مثال سريع — اللغة المخصصة
+
+```
+var speed = 150;
+var counter = 0;
+
+func drive_forward(spd) {
+    motor("left",  spd);
+    motor("right", spd);
+}
+
+while (counter < 10) {
+    drive_forward(speed);
+    var counter = counter + 1;
+    delay(100);
+}
+
+led("status", 1);
+print("Done!");
+```
+
+### مثال سريع — المحاكي الكامل
+
+```python
+from firmware.simulator.simulator import FirmwareSimulator
+
+sim = FirmwareSimulator()
+sim.init()
+
+code = """
+var x = 0;
+for (var i = 0; i < 5; i = i + 1) {
+    var x = x + i;
+}
+print(x);
+"""
+
+sim.run_program(code)
+sim.print_statistics()
+sim.deinit()
+```
+
+---
+
+## 📊 حالة المشروع
+
+| المكون | الحالة | الأسطر |
+|---|---|---|
+| Python Simulation Layer | ✅ مكتمل | ~3,450 |
+| Custom Language Engine | ✅ مكتمل | ~1,200 |
+| Test Suite | ✅ 14/14 PASS | ~400 |
+| C Hardware Drivers (4) | ✅ مكتمل | ~2,251 |
+| ARM Assembly Core | ✅ مكتمل | ~800 |
+| HAL Assembly Primitives | ✅ مكتمل | ~400 |
+| I2C Driver | ✅ مكتمل ★ NEW | - |
+| SPI Driver | ✅ مكتمل ★ NEW | - |
+| ADC Driver | ✅ مكتمل ★ NEW | - |
+| Peripheral ASM Helpers | ✅ مكتمل ★ NEW | - |
+| ESP32 Support | 🔄 قيد التطوير | - |
+| STM32 Native Deploy | 🔄 قيد التطوير | - |
+
+---
+
+## 🎯 الخطوات التالية — المرحلة 3
+
+- [ ] تحويل الـ Scheduler والـ Language Engine إلى C
+- [ ] تحسين استهلاك الذاكرة (< 15 KB heap)
+- [ ] إضافة قدرات Real-Time الكاملة
+- [ ] النشر الفعلي على ESP32
+- [ ] النشر الفعلي على STM32F407
+- [ ] إضافة بروتوكولات اتصال (SPI display, I2C IMU)
+- [ ] نظام المقاطعات الكامل (Full IRQ system)
+- [ ] File System خفيف على Flash
+
+---
+
+## 📦 التبعيات
+
+```
+ply          # Lexer/Parser library
+pyserial     # UART communication (اختياري)
+pytest       # Testing framework (اختياري)
+```
+
+---
+
+## 📚 التوثيق
+
+| الملف | المحتوى |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | معمارية النظام (عربي) |
+| [docs/ARCHITECTURE_FULL.md](docs/ARCHITECTURE_FULL.md) | المعمارية الكاملة مع ASM |
+| [docs/API_REFERENCE.md](docs/API_REFERENCE.md) | مرجع API الكامل |
+| [docs/QUICKSTART.md](docs/QUICKSTART.md) | دليل البداية السريعة |
+| [docs/C_DRIVERS_BUILD.md](docs/C_DRIVERS_BUILD.md) | بناء درايفرات C |
+| [docs/SUMMARY.md](docs/SUMMARY.md) | ملخص المشروع |
+
+---
+
+## 📝 الرخصة
+
+مشروع مفتوح المصدر لأغراض تعليمية وبحثية في مجال الأنظمة المدمجة.
+
+---
+
+<div align="center">
+
+**آخر تحديث**: فبراير 2026 | **الإصدار**: 2.0 (المرحلة 2 مكتملة)  
+**الحالة**: ✅ جاهز للمحاكاة — 🔄 قيد التطوير للنشر على MCU
+
+</div>
